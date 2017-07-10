@@ -32,7 +32,12 @@ public class Main {
             }else{
                 System.out.println("Other uri: "+uri);
 
-                File file = new File("/home/dev/Downloads" + uri);
+                String path = uri;
+                if(uri.endsWith("/")){
+                    path = uri+"index.html";
+                }
+
+                File file = new File("/home/dev/Documents/java-sandbox/rxwsgame/src/main/resources/public" + path);
                 if(file.exists() && file.isFile()){
                     return response.writeBytes(Bytes.from(file));
                 }else{
