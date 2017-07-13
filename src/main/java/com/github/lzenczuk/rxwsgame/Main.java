@@ -1,11 +1,13 @@
 package com.github.lzenczuk.rxwsgame;
 
 import com.github.davidmoten.rx.Bytes;
+import com.github.lzenczuk.rxwsgame.message.*;
+import com.github.lzenczuk.rxwsgame.model.Board;
 import io.netty.buffer.ByteBuf;
 import io.netty.buffer.Unpooled;
 import io.netty.handler.codec.http.HttpResponseStatus;
 import io.netty.handler.codec.http.websocketx.BinaryWebSocketFrame;
-import io.netty.handler.codec.http.websocketx.TextWebSocketFrame;
+import io.netty.handler.codec.http.websocketx.CloseWebSocketFrame;
 import io.netty.handler.codec.http.websocketx.WebSocketFrame;
 import io.netty.handler.logging.LogLevel;
 import io.reactivex.netty.protocol.http.server.HttpServer;
@@ -13,7 +15,6 @@ import rx.Observable;
 import rx.subjects.PublishSubject;
 
 import java.io.File;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Created by dev on 10/07/17.
@@ -21,6 +22,9 @@ import java.util.concurrent.TimeUnit;
 public class Main {
 
     public static void main(String[] args) {
+
+        WSMessageProcessor processor = new WSMessageProcessor();
+        Board board = new Board();
 
         HttpServer<ByteBuf, ByteBuf> server = HttpServer.newServer(8088)
                 .enableWireLogging("Http server", LogLevel.DEBUG)
@@ -34,70 +38,46 @@ public class Main {
 
                     return response.acceptWebSocketUpgrade(wsConnection -> {
 
-                        PublishSubject<Void> closeConnection = PublishSubject.create();
+                        long connectionId = System.currentTimeMillis();
 
-                        /*wsConnection.writeAndFlushOnEach(outputPublisher.map(s -> {
-                            System.out.println("Output write: "+s);
-                            return new BinaryWebSocketFrame(Unpooled.copiedBuffer(s.getBytes()));
-                        }));*/
+                        Observable<WSCommand> input = wsConnection.getInput()
+                                .map(wsf -> {
+                                    if (wsf instanceof BinaryWebSocketFrame) {
+                                        BinaryWebSocketFrame bwsf = (BinaryWebSocketFrame) wsf;
+                                        try {
+                                            ByteBuf content = bwsf.content();
+                                            byte[] bytes = new byte[content.readableBytes()];
+                                            content.readBytes(bytes);
 
-                        /*String[] msges = new String[3];
-                        msges[0]="test1";
-                        msges[1]="test2";
-                        msges[2]="test3";*/
+                                            WSCommand wsCommand = processor.parseByteArray(bytes);
+                                            System.out.println(wsCommand);
+                                            bwsf.release();
+                                            return wsCommand;
+                                        } catch (IllegalAccessException | InstantiationException e) {
+                                            System.out.println("Unknown message");
+                                            bwsf.release();
+                                            return new ErrorCommand();
+                                        }
+                                    } else if (wsf instanceof CloseWebSocketFrame) {
+                                        return new TerminateCommand(connectionId);
+                                    }
 
-                        System.out.println("----------> create output observable");
-                        Observable<WebSocketFrame> outOb = Observable.interval(1l, TimeUnit.SECONDS)
-                                .map(aLong -> {
-                                    System.out.println("Tick mapp");
-                                    return "Tick: " + aLong;
-                                })
-                                .onBackpressureBuffer()
-                                .map(s -> {
-                                    System.out.println("Output write: " + s);
-                                    //return new TextWebSocketFrame(s);
-                                    return new BinaryWebSocketFrame(Unpooled.copiedBuffer(s.getBytes()));
-                                }).cast(WebSocketFrame.class);
+                                    return new ErrorCommand();
 
-                        /*Observable<WebSocketFrame> outOb = Observable.from(msges).map(s -> {
-                            System.out.println("Output write: " + s);
-                            return new BinaryWebSocketFrame(Unpooled.copiedBuffer(s.getBytes()));
-                        });*/
+                                }).filter(wsCommand -> !(wsCommand instanceof ErrorCommand));
 
-                        wsConnection.getInput()
-                                .filter(wsf -> {
-                                    if(wsf instanceof BinaryWebSocketFrame){
+                        board.getInput().onNext(input);
+
+                        Observable<WebSocketFrame> output = board.getOutput()
+                                .takeUntil(wsEvent -> {
+                                    if(wsEvent instanceof TerminateEvent && ((TerminateEvent) wsEvent).getClientId()==connectionId){
+                                        System.out.println("----------> terminate");
                                         return true;
-                                    }else{
-                                        wsf.release();
-                                        return false;
                                     }
+                                    return false;
                                 })
-                                .cast(BinaryWebSocketFrame.class)
-                                .forEach(bwsf -> {
-                                    byte type = bwsf.content().getByte(0);
-                                    switch (type){
-                                        case 0:
-                                            System.out.println("Zero");
-                                            break;
-                                        case 1:
-                                            System.out.println("One");
-                                            break;
-                                        case 127:
-                                            System.out.println("#################################");
-                                            System.out.println("-------> End");
-                                            System.out.println("#################################");
-                                            closeConnection.onCompleted();
-                                            break;
-                                        default:
-                                            System.out.println("Unknown");
-                                    }
-
-                                    bwsf.release();
-                                });
-
-                        System.out.println("----------> Write output");
-                        return Observable.merge(closeConnection, wsConnection.writeAndFlushOnEach(outOb));
+                                .map(wsEvent -> new BinaryWebSocketFrame(Unpooled.wrappedBuffer(wsEvent.toByteArray())));
+                        return wsConnection.writeAndFlushOnEach(output);
                     });
                 }else{
                     System.out.println("Not WS");
